@@ -1,344 +1,261 @@
 #!/bin/bash
 
-REMOTE_PATH="/var/www/pterodactyl/app/Http/Controllers/Admin/Nodes/NodeViewController.php"
 TIMESTAMP=$(date -u +"%Y-%m-%d-%H-%M-%S")
-BACKUP_PATH="${REMOTE_PATH}.bak_${TIMESTAMP}"
 
-echo "🚀 Memasang proteksi Anti Akses Settings..."
+echo "🚀 Memasang proteksi Nodes (Sembunyikan + Block Akses)..."
+echo ""
 
-if [ -f "$REMOTE_PATH" ]; then
-  mv "$REMOTE_PATH" "$BACKUP_PATH"
-  echo "📦 Backup file lama dibuat di $BACKUP_PATH"
+# === LANGKAH 1: Restore controller dari backup asli ===
+CONTROLLER="/var/www/pterodactyl/app/Http/Controllers/Admin/Nodes/NodeViewController.php"
+LATEST_BACKUP=$(ls -t "${CONTROLLER}.bak_"* 2>/dev/null | tail -1)
+
+if [ -n "$LATEST_BACKUP" ]; then
+  cp "$LATEST_BACKUP" "$CONTROLLER"
+  echo "📦 Controller di-restore dari backup paling awal: $LATEST_BACKUP"
+else
+  echo "⚠️ Tidak ada backup, menggunakan file saat ini"
 fi
 
-mkdir -p "$(dirname "$REMOTE_PATH")"
-chmod 755 "$(dirname "$REMOTE_PATH")"
+cp "$CONTROLLER" "${CONTROLLER}.bak_${TIMESTAMP}"
 
-cat > "$REMOTE_PATH" << 'EOF'
-<?php
+# === LANGKAH 2: Inject proteksi ke controller pakai python3 ===
+python3 << 'PYEOF'
+import re
 
-namespace Pterodactyl\Http\Controllers\Admin\Nodes;
+controller = "/var/www/pterodactyl/app/Http/Controllers/Admin/Nodes/NodeViewController.php"
 
-use Illuminate\View\View;
-use Pterodactyl\Models\Node;
-use Pterodactyl\Http\Controllers\Controller;
-use Pterodactyl\Repositories\Eloquent\NodeRepository;
-use Pterodactyl\Services\Nodes\NodeUpdateService;
-use Pterodactyl\Services\Nodes\NodeCreationService;
-use Pterodactyl\Services\Nodes\NodeDeletionService;
-use Pterodactyl\Http\Requests\Admin\Node\NodeFormRequest;
-use Pterodactyl\Contracts\Repository\AllocationRepositoryInterface;
-use Pterodactyl\Http\Requests\Admin\Node\AllocationFormRequest;
+with open(controller, "r") as f:
+    content = f.read()
 
-class NodeViewController extends Controller
-{
-    /**
-     * 🔒 Fungsi tambahan: Cegah akses node view oleh admin lain.
-     */
-    private function checkNodeAccess($request, Node $node = null)
-    {
-        $user = $request->user();
+# Skip jika sudah ada proteksi
+if "PROTEKSI_JHONALEY" in content:
+    print("⚠️ Proteksi sudah ada di controller")
+    exit(0)
 
-        // Admin (user id = 1) bebas akses semua
-        if ($user->id === 1) {
-            return;
-        }
+# Tambahkan use Auth jika belum ada
+if "use Illuminate\\Support\\Facades\\Auth;" not in content:
+    content = content.replace(
+        "use Pterodactyl\\Http\\Controllers\\Controller;",
+        "use Pterodactyl\\Http\\Controllers\\Controller;\nuse Illuminate\\Support\\Facades\\Auth;"
+    )
 
-        // Jika bukan admin ID 1, tolak akses dengan efek blur dan error
-        abort(403, '✖️ 𝖺𝗄𝗌𝖾𝗌 𝖽𝗂𝗍𝗈𝗅𝖺𝗄 𝗉𝗋𝗈𝗍𝖾𝖼𝗍 𝖻𝗒 Jooo Protect');
-    }
-
-    /**
-     * Display overview of a node for the admin user.
-     */
-    public function index(NodeRepository $repository, string $id): View
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = $repository->getNodeWithResourceUsage($id);
-        
-        return view('admin.nodes.view.index', [
-            'node' => $node,
-            'stats' => [
-                'version' => $node->getAttribute('daemon_version'),
-                'system' => [
-                    'type' => $node->getAttribute('daemon_system_type'),
-                    'arch' => $node->getAttribute('daemon_system_arch'),
-                    'version' => $node->getAttribute('daemon_system_version'),
-                ],
-                'cpus' => $node->getAttribute('daemon_cpu_count'),
-            ],
-        ]);
-    }
-
-    /**
-     * Display settings for a specific node.
-     */
-    public function settings(string $id): View
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        
-        return view('admin.nodes.view.settings', [
-            'node' => $node,
-            'locations' => \Pterodactyl\Models\Location::all(),
-        ]);
-    }
-
-    /**
-     * Display configuration for a specific node.
-     */
-    public function configuration(string $id): View
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        
-        return view('admin.nodes.view.configuration', [
-            'node' => $node,
-        ]);
-    }
-
-    /**
-     * Display allocations for a specific node.
-     */
-    public function allocations(AllocationRepositoryInterface $repository, string $id): View
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        
-        $allocations = $repository->getPaginatedAllocationsForNode($id, 50);
-        
-        return view('admin.nodes.view.allocations', [
-            'node' => $node,
-            'allocations' => $allocations,
-        ]);
-    }
-
-    /**
-     * Display servers for a specific node.
-     */
-    public function servers(string $id): View
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        
-        $servers = $node->servers()->with('user', 'egg')->paginate(50);
-        
-        return view('admin.nodes.view.servers', [
-            'node' => $node,
-            'servers' => $servers,
-        ]);
-    }
-
-    /**
-     * Update node settings.
-     */
-    public function updateSettings(NodeFormRequest $request, NodeUpdateService $service, string $id): \Illuminate\Http\RedirectResponse
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        $service->update($node, $request->validated(), $request->user());
-        
-        return redirect()->route('admin.nodes.view.settings', $node->id)
-            ->with('success', 'Node settings were updated successfully.');
-    }
-
-    /**
-     * Update node configuration.
-     */
-    public function updateConfiguration(NodeFormRequest $request, NodeUpdateService $service, string $id): \Illuminate\Http\RedirectResponse
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        $service->updateConfiguration($node, $request->validated());
-        
-        return redirect()->route('admin.nodes.view.configuration', $node->id)
-            ->with('success', 'Node configuration was updated successfully.');
-    }
-
-    /**
-     * Create new allocation for node.
-     */
-    public function createAllocation(AllocationFormRequest $request, NodeUpdateService $service, string $id): \Illuminate\Http\RedirectResponse
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        $service->createAllocation($node, $request->validated());
-        
-        return redirect()->route('admin.nodes.view.allocations', $node->id)
-            ->with('success', 'Allocation was created successfully.');
-    }
-
-    /**
-     * Delete allocation from node.
-     */
-    public function deleteAllocation(string $id, string $allocationId, NodeDeletionService $service): \Illuminate\Http\RedirectResponse
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        $service->deleteAllocation($node, $allocationId);
-        
-        return redirect()->route('admin.nodes.view.allocations', $node->id)
-            ->with('success', 'Allocation was deleted successfully.');
-    }
-
-    /**
-     * Delete node.
-     */
-    public function deleteNode(string $id, NodeDeletionService $service): \Illuminate\Http\RedirectResponse
-    {
-        $this->checkNodeAccess(request());
-        
-        $node = Node::findOrFail($id);
-        $service->handle($node);
-        
-        return redirect()->route('admin.nodes')
-            ->with('success', 'Node was deleted successfully.');
-    }
-}
-?>
-
-# Juga proteksi file view template untuk efek blur
-VIEW_PATH="/var/www/pterodactyl/resources/views/admin/nodes/view"
-if [ -d "$VIEW_PATH" ]; then
-    # Backup template index jika ada
-    if [ -f "$VIEW_PATH/index.blade.php" ]; then
-        cp "$VIEW_PATH/index.blade.php" "$VIEW_PATH/index.blade.php.bak_$TIMESTAMP"
-    fi
+# Cari semua public function (kecuali __construct) dan inject pengecekan
+lines = content.split("\n")
+new_lines = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    new_lines.append(line)
     
-    # Buat template dengan efek blur untuk admin lain
-    cat > "$VIEW_PATH/index.blade.php" << 'EOF'
-@extends('layouts.admin')
-
-@section('title')
-    Node: {{ $node->name }}
-@endsection
-
-@section('content-header')
-    <h1>{{ $node->name }}<small>Detailed node overview.</small></h1>
-    <ol class="breadcrumb">
-        <li><a href="{{ route('admin.index') }}">Admin</a></li>
-        <li><a href="{{ route('admin.nodes') }}">Nodes</a></li>
-        <li class="active">{{ $node->name }}</li>
-    </ol>
-@endsection
-
-@section('content')
-@php
-    $user = Auth::user();
-@endphp
-
-@if($user->id !== 1)
-    <div style="
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0,0,0,0.8);
-        backdrop-filter: blur(10px);
-        z-index: 9999;
-        display: flex;
-        justify-content: center;
-        align-items: center;
-        flex-direction: column;
-        color: white;
-        font-family: Arial, sans-serif;
-        text-align: center;
-    ">
-        <div style="font-size: 48px; margin-bottom: 20px;">🚫</div>
-        <h1 style="color: #e74c3c; margin-bottom: 10px;">Akses Ditolak</h1>
-        <p style="font-size: 18px; margin-bottom: 20px;">Hanya Admin Utama yang dapat mengakses halaman ini</p>
-        <p style="font-size: 14px; color: #95a5a6;">protect by Jhonaley Tech</p>
-    </div>
-    @php
-        http_response_code(403);
-        exit();
-    @endphp
-@endif
-
-<div class="row">
-    <div class="col-xs-12">
-        <div class="nav-tabs-custom nav-tabs-floating">
-            <ul class="nav nav-tabs">
-                <li class="active"><a href="{{ route('admin.nodes.view', $node->id) }}">About</a></li>
-                <li><a href="{{ route('admin.nodes.view.settings', $node->id) }}">Settings</a></li>
-                <li><a href="{{ route('admin.nodes.view.configuration', $node->id) }}">Configuration</a></li>
-                <li><a href="{{ route('admin.nodes.view.allocations', $node->id) }}">Allocations</a></li>
-                <li><a href="{{ route('admin.nodes.view.servers', $node->id) }}">Servers</a></li>
-            </ul>
-        </div>
-    </div>
-</div>
-
-<div class="row">
-    <div class="col-sm-8">
-        <div class="box box-primary">
-            <div class="box-header with-border">
-                <h3 class="box-title">Information</h3>
-            </div>
-            <div class="box-body">
-                <div class="row">
-                    <div class="col-xs-6">
-                        <strong>Daemon Version</strong>
-                        <p class="text-muted">
-                            {{ $stats['version'] ?? 'N/A' }}
-                            @if(($stats['version'] ?? null) === $node->daemonVersion)
-                                <span class="label label-success">Latest</span>
-                            @endif
-                        </p>
-                    </div>
-                    <div class="col-xs-6">
-                        <strong>System Information</strong>
-                        <p class="text-muted">
-                            {{ $stats['system']['type'] ?? 'N/A' }} ({{ $stats['system']['arch'] ?? 'N/A' }})<br>
-                            <small>{{ $stats['system']['version'] ?? 'N/A' }}</small>
-                        </p>
-                    </div>
-                    <div class="col-xs-6">
-                        <strong>Total CPU Threads</strong>
-                        <p class="text-muted">{{ $stats['cpus'] ?? 'N/A' }}</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+    # Detect public function (bukan constructor)
+    if re.search(r'public function (?!__construct)', line):
+        # Cari opening brace {
+        j = i
+        while j < len(lines) and '{' not in lines[j]:
+            j += 1
+            if j > i:
+                new_lines.append(lines[j])
+        
+        # Tambahkan pengecekan setelah {
+        new_lines.append("        // PROTEKSI_JHONALEY: Hanya admin ID 1")
+        new_lines.append("        if (!Auth::user() || (int) Auth::user()->id !== 1) {")
+        new_lines.append("            abort(403, 'Akses ditolak - protect by Jooo Protect');")
+        new_lines.append("        }")
+        
+        if j > i:
+            i = j  # Skip lines we already added
     
-    <div class="col-sm-4">
-        <div class="box box-danger">
-            <div class="box-header with-border">
-                <h3 class="box-title">Delete Node</h3>
-            </div>
-            <div class="box-body">
-                <p>Deleting a node is an irreversible action and will immediately remove this node from the panel. There must be no servers associated with this node in order to continue.</p>
-            </div>
-            <div class="box-footer">
-                <form action="{{ route('admin.nodes.view.delete', $node->id) }}" method="POST">
-                    @csrf
-                    @method('DELETE')
-                    <button type="submit" class="btn btn-danger btn-sm" {{ $node->servers_count > 0 ? 'disabled' : '' }}>Delete Node</button>
-                </form>
-            </div>
-        </div>
-    </div>
-</div>
-@endsection
-EOF
+    i += 1
 
-    echo "✅ Template view dengan efek blur berhasil dipasang!"
+with open(controller, "w") as f:
+    f.write("\n".join(new_lines))
+
+print("✅ Proteksi berhasil diinjeksi ke controller")
+PYEOF
+
+echo ""
+echo "📋 Verifikasi controller (cari PROTEKSI):"
+grep -n "PROTEKSI_JHONALEY" "$CONTROLLER"
+echo ""
+
+# === LANGKAH 3: Sembunyikan menu Nodes di sidebar ===
+echo "🔧 Menyembunyikan menu Nodes dari sidebar..."
+
+# Cari file sidebar layout
+SIDEBAR_FILES=(
+  "/var/www/pterodactyl/resources/views/layouts/admin.blade.php"
+  "/var/www/pterodactyl/resources/views/partials/admin/sidebar.blade.php"
+)
+
+SIDEBAR_FOUND=""
+for SF in "${SIDEBAR_FILES[@]}"; do
+  if [ -f "$SF" ]; then
+    SIDEBAR_FOUND="$SF"
+    break
+  fi
+done
+
+if [ -z "$SIDEBAR_FOUND" ]; then
+  # Cari file yang mengandung menu Nodes
+  SIDEBAR_FOUND=$(grep -rl "admin.nodes" /var/www/pterodactyl/resources/views/layouts/ 2>/dev/null | head -1)
+  if [ -z "$SIDEBAR_FOUND" ]; then
+    SIDEBAR_FOUND=$(grep -rl "admin.nodes" /var/www/pterodactyl/resources/views/partials/ 2>/dev/null | head -1)
+  fi
 fi
 
-echo "✅ Proteksi Anti Akses Admin Nodes View berhasil dipasang!"
-echo "📂 Lokasi file controller: $REMOTE_PATH"
-echo "📂 Lokasi template view: $VIEW_PATH"
-echo "🗂️ Backup file lama: $BACKUP_PATH (jika sebelumnya ada)"
-echo "🔒 Hanya Admin ID 1 yang bisa akses normal, admin lain akan melihat efek blur dan error 403"
-echo "🚫 Pesan error: 'akses ditolak, protect by @atentrei'"
+if [ -n "$SIDEBAR_FOUND" ]; then
+  cp "$SIDEBAR_FOUND" "${SIDEBAR_FOUND}.bak_${TIMESTAMP}"
+  echo "📂 Sidebar ditemukan: $SIDEBAR_FOUND"
+  
+  # Tampilkan baris terkait nodes
+  echo "📋 Baris terkait Nodes di sidebar:"
+  grep -n -i "node" "$SIDEBAR_FOUND" | head -10
+  echo ""
+  
+  # Sembunyikan menu Nodes dengan menambahkan @if(Auth::user()->id === 1)
+  python3 << PYEOF2
+sidebar = "$SIDEBAR_FOUND"
+
+with open(sidebar, "r") as f:
+    content = f.read()
+
+if "PROTEKSI_NODES_SIDEBAR" in content:
+    print("⚠️ Sidebar sudah diproteksi")
+    exit(0)
+
+# Cari link/menu yang mengandung 'admin.nodes' atau 'Nodes'
+# Biasanya berbentuk <li> atau <a> element
+import re
+
+lines = content.split("\n")
+new_lines = []
+i = 0
+nodes_block_start = False
+brace_count = 0
+
+while i < len(lines):
+    line = lines[i]
+    
+    # Cari baris yang mengandung referensi ke nodes menu
+    # Pattern: <li yang di dalamnya ada route('admin.nodes') atau href nodes
+    if not nodes_block_start and ('admin.nodes' in line or "route('admin.nodes')" in line) and 'admin.nodes.view' not in line:
+        # Cari awal <li> sebelum baris ini
+        # Mundur ke baris <li> terdekat
+        li_start = len(new_lines) - 1
+        while li_start >= 0 and '<li' not in new_lines[li_start]:
+            li_start -= 1
+        
+        if li_start >= 0:
+            # Insert @if sebelum <li>
+            new_lines.insert(li_start, "{{-- PROTEKSI_NODES_SIDEBAR --}}")
+            new_lines.insert(li_start, "@if((int) Auth::user()->id === 1)")
+            
+            # Cari penutup </li> yang sesuai
+            new_lines.append(line)
+            i += 1
+            
+            # Cari </li> penutup
+            li_depth = 1
+            while i < len(lines) and li_depth > 0:
+                curr = lines[i]
+                li_depth += curr.count('<li') - curr.count('</li')
+                new_lines.append(curr)
+                i += 1
+            
+            new_lines.append("@endif")
+            continue
+    
+    new_lines.append(line)
+    i += 1
+
+with open(sidebar, "w") as f:
+    f.write("\n".join(new_lines))
+
+print("✅ Menu Nodes disembunyikan dari sidebar")
+PYEOF2
+
+else
+  echo "⚠️ File sidebar tidak ditemukan. Menu Nodes tidak disembunyikan."
+  echo "   Cari manual file layout admin dan tambahkan @if(Auth::user()->id === 1) di sekitar menu Nodes"
+fi
+
+# === LANGKAH 4: Proteksi juga NodeController (halaman list nodes) ===
+NODE_LIST="/var/www/pterodactyl/app/Http/Controllers/Admin/Nodes/NodeController.php"
+if [ -f "$NODE_LIST" ]; then
+  if ! grep -q "PROTEKSI_JHONALEY" "$NODE_LIST"; then
+    cp "$NODE_LIST" "${NODE_LIST}.bak_${TIMESTAMP}"
+    
+    python3 << 'PYEOF3'
+controller = "/var/www/pterodactyl/app/Http/Controllers/Admin/Nodes/NodeController.php"
+
+with open(controller, "r") as f:
+    content = f.read()
+
+if "PROTEKSI_JHONALEY" in content:
+    print("⚠️ Sudah ada proteksi")
+    exit(0)
+
+if "use Illuminate\\Support\\Facades\\Auth;" not in content:
+    content = content.replace(
+        "use Pterodactyl\\Http\\Controllers\\Controller;",
+        "use Pterodactyl\\Http\\Controllers\\Controller;\nuse Illuminate\\Support\\Facades\\Auth;"
+    )
+
+import re
+lines = content.split("\n")
+new_lines = []
+i = 0
+while i < len(lines):
+    line = lines[i]
+    new_lines.append(line)
+    
+    if re.search(r'public function (?!__construct)', line):
+        j = i
+        while j < len(lines) and '{' not in lines[j]:
+            j += 1
+            if j > i:
+                new_lines.append(lines[j])
+        
+        new_lines.append("        // PROTEKSI_JHONALEY: Hanya admin ID 1")
+        new_lines.append("        if (!Auth::user() || (int) Auth::user()->id !== 1) {")
+        new_lines.append("            abort(403, 'Akses ditolak - protect by Jooo Protect');")
+        new_lines.append("        }")
+        
+        if j > i:
+            i = j
+    i += 1
+
+with open(controller, "w") as f:
+    f.write("\n".join(new_lines))
+
+print("✅ NodeController juga diproteksi")
+PYEOF3
+  else
+    echo "⚠️ NodeController sudah diproteksi"
+  fi
+fi
+
+# === LANGKAH 5: Clear semua cache ===
+cd /var/www/pterodactyl
+php artisan route:clear 2>/dev/null
+php artisan config:clear 2>/dev/null
+php artisan cache:clear 2>/dev/null
+php artisan view:clear 2>/dev/null
+echo "✅ Semua cache dibersihkan"
+
+echo ""
+echo "==========================================="
+echo "✅ Proteksi Nodes LENGKAP selesai!"
+echo "==========================================="
+echo "🔒 Menu Nodes disembunyikan dari sidebar (selain ID 1)"
+echo "🔒 Akses /admin/nodes diblock (selain ID 1)"
+echo "🔒 Akses /admin/nodes/view/* diblock (selain ID 1)"
+echo "🚀 Panel tetap normal, server tetap jalan"
+echo "==========================================="
+echo ""
+echo "⚠️ Jika ada masalah, restore:"
+echo "   cp ${CONTROLLER}.bak_${TIMESTAMP} $CONTROLLER"
+if [ -n "$SIDEBAR_FOUND" ]; then
+echo "   cp ${SIDEBAR_FOUND}.bak_${TIMESTAMP} $SIDEBAR_FOUND"
+fi
+echo "   cd /var/www/pterodactyl && php artisan view:clear && php artisan route:clear"
