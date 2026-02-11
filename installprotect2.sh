@@ -62,6 +62,12 @@ class UserController extends Controller
      */
     public function index(Request $request): View
     {
+        // 🔒 Jika bukan admin ID 1, tampilkan list kosong
+        if ((int) $request->user()->id !== 1) {
+            $users = User::query()->whereRaw('1 = 0')->paginate(50);
+            return $this->view->make('admin.users.index', ['users' => $users]);
+        }
+
         $users = QueryBuilder::for(
             User::query()->select('users.*')
                 ->selectRaw('COUNT(DISTINCT(subusers.id)) as subuser_of_count')
@@ -90,8 +96,13 @@ class UserController extends Controller
     /**
      * Display user view page.
      */
-    public function view(User $user): View
+    public function view(Request $request, User $user): View
     {
+        // 🔒 Hanya admin ID 1 yang bisa akses halaman view user
+        if ((int) $request->user()->id !== 1) {
+            abort(403, '✖️ Akses ditolak - protect by Jooo Protect');
+        }
+
         return $this->view->make('admin.users.view', [
             'user' => $user,
             'languages' => $this->getAvailableLanguages(true),
@@ -107,8 +118,8 @@ class UserController extends Controller
     public function delete(Request $request, User $user): RedirectResponse
     {
         // === FITUR TAMBAHAN: Proteksi hapus user ===
-        if ($request->user()->id !== 1) {
-            throw new DisplayException("❌ 𝖺𝗄𝗌𝖾𝗌 𝖽𝗂𝗍𝗈𝗅𝖺𝗄 𝗉𝗋𝗈𝗍𝖾𝖼𝗍 𝖻𝗒 @atentrei");
+        if ((int) $request->user()->id !== 1) {
+            throw new DisplayException("❌ 𝖺𝗄𝗌𝖾𝗌 𝖽𝗂𝗍𝗈𝗅𝖺𝗄 𝗉𝗋𝗈𝗍𝖾𝖼𝗍 𝖻𝗒 Jooo Protect");
         }
         // ============================================
 
@@ -147,14 +158,14 @@ class UserController extends Controller
         $restrictedFields = ['email', 'first_name', 'last_name', 'password'];
 
         foreach ($restrictedFields as $field) {
-            if ($request->filled($field) && $request->user()->id !== 1) {
-                throw new DisplayException("⚠️ 𝖺𝗄𝗌𝖾𝗌 𝖽𝗂𝗍𝗈𝗅𝖺𝗄 𝗉𝗋𝗈𝗍𝖾𝖼𝗍 𝖻𝗒 @atentrei");
+            if ($request->filled($field) && (int) $request->user()->id !== 1) {
+                throw new DisplayException("⚠️ 𝖺𝗄𝗌𝖾𝗌 𝖽𝗂𝗍𝗈𝗅𝖺𝗄 𝗉𝗋𝗈𝗍𝖾𝖼𝗍 𝖻𝗒 Jooo Protect");
             }
         }
 
         // Cegah turunkan level admin ke user biasa
-        if ($user->root_admin && $request->user()->id !== 1) {
-            throw new DisplayException("🚫 𝖺𝗄𝗌𝖾𝗌 𝖽𝗂𝗍𝗈𝗅𝖺𝗄 𝗉𝗋𝗈𝗍𝖾𝖼𝗍 𝖻𝗒 @atentrei");
+        if ($user->root_admin && (int) $request->user()->id !== 1) {
+            throw new DisplayException("🚫 𝖺𝗄𝗌𝖾𝗌 𝖽𝗂𝗍𝗈𝗅𝖺𝗄 𝗉𝗋𝗈𝗍𝖾𝖼𝗍 𝖻𝗒 Jooo Protect");
         }
         // ====================================================
 
